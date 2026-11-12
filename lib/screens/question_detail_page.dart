@@ -46,6 +46,12 @@ class QuestionDetailPage extends StatefulWidget {
   final int questionIndex;
   final String? bankId;
   final bool defaultShowCutContent;
+  /// Applied only when loading another chapter; the initial list is already
+  /// filtered by the caller. Other entry points retain their existing behavior.
+  final Future<MapEntry<List<Question>, List<UserQuestion>>> Function(
+    List<Question> questions,
+    List<UserQuestion> userQuestions,
+  )? chapterQuestionFilter;
 
   const QuestionDetailPage({
     super.key,
@@ -55,6 +61,7 @@ class QuestionDetailPage extends StatefulWidget {
     required this.questionIndex,
     this.bankId,
     this.defaultShowCutContent = false,
+    this.chapterQuestionFilter,
   });
 
   @override
@@ -308,11 +315,28 @@ class _QuestionDetailPageState extends State<QuestionDetailPage> {
       }
     }
 
+    final filter = widget.chapterQuestionFilter;
+    if (filter != null && newQuestions.isNotEmpty) {
+      try {
+        final filtered = await filter(newQuestions, newUserQuestions);
+        newQuestions = filtered.key;
+        newUserQuestions = filtered.value;
+      } catch (error) {
+        debugPrint('[QuestionDetailPage] 章节筛选失败：$error');
+        _isSwitchingChapter = false;
+        return;
+      }
+    }
+    if (!mounted) {
+      _isSwitchingChapter = false;
+      return;
+    }
+
     if (newQuestions.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('《${targetChapter.name}》暂无可做题目'),
+            content: Text('《${targetChapter.name}》在当前筛选条件下暂无可做题目'),
             behavior: SnackBarBehavior.floating,
           ),
         );

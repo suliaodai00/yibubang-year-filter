@@ -9,6 +9,8 @@ import 'question_detail_page.dart';
 import 'question_detail/chapter_cross_indicator.dart';
 
 import '../common/app_strings.dart';
+import '../common/question_year_filter.dart';
+import '../widgets/question_year_filter_section.dart';
 import '../models/chapter.dart';
 import '../models/question.dart';
 import '../models/answer_statistics.dart';
@@ -63,6 +65,8 @@ class _QuestionGridPageState extends State<QuestionGridPage> {
   int questionType = 0;
   int category = 0;
   int mode = 0;
+  // Deliberately page-local: never leak a chapter/bank's years into global prefs.
+  QuestionYearFilter _yearFilter = const QuestionYearFilter.all();
 
   // 本章节统计
   late Future<PeriodStats> _chapterStats;
@@ -313,29 +317,39 @@ class _QuestionGridPageState extends State<QuestionGridPage> {
 
   Future<MapEntry<List<Question>, List<UserQuestion>>> _filter(
     Future<List<Question>> questionsFuture,
-    Future<List<UserQuestion>> userQuestionsFuture,
-  ) async {
+    Future<List<UserQuestion>> userQuestionsFuture, {
+    bool updateChapterNumbers = true,
+  }) async {
+    // Capture before awaiting: an older rebuild must not read newer UI choices.
+    final selectedYearFilter = _yearFilter;
+    final selectedCategory = category;
+    final selectedCutType = cutType;
+    final selectedQuestionType = questionType;
     List<Question> questions = await questionsFuture;
     List<UserQuestion> userQuestions = await userQuestionsFuture;
-    _chapterQuestionNumbers = {
-      for (var i = 0; i < questions.length; i++) questions[i].id: i + 1,
-    };
+    final yearCatalog = QuestionYearCatalog.fromValues(questions.map((q) => q.year));
+    if (updateChapterNumbers) {
+      _chapterQuestionNumbers = {
+        for (var i = 0; i < questions.length; i++) questions[i].id: i + 1,
+      };
+    }
     // 1️⃣ 根据 category 和 cutType 先过滤 userQuestions
     userQuestions = userQuestions.where((uq) {
-      if (category == 1 && uq.status != 2) return false; // 只保留做错的题目
-      if (category == 2 && uq.collection != 1) return false; // 只保留收藏的题目
-      if (category == 3 && uq.status != 0) return false; // 只保留未做的题目
-      if (cutType == 1 && !uq.isCut) return false; // 过滤 cutType: 仅保留已斩
-      if (cutType == 2 && uq.isCut) return false; // 过滤 cutType: 仅保留未斩
+      if (selectedCategory == 1 && uq.status != 2) return false; // 只保留做错的题目
+      if (selectedCategory == 2 && uq.collection != 1) return false; // 只保留收藏的题目
+      if (selectedCategory == 3 && uq.status != 0) return false; // 只保留未做的题目
+      if (selectedCutType == 1 && !uq.isCut) return false; // 过滤 cutType: 仅保留已斩
+      if (selectedCutType == 2 && uq.isCut) return false; // 过滤 cutType: 仅保留未斩
       return true;
     }).toList();
     // 2️⃣ 根据 questionType 先过滤 questions
     questions = questions.where((q) {
-      if (questionType == 0) return true;
-      final selectedTypeName = questionTypes[questionType];
+      if (!selectedYearFilter.matches(q.year, yearCatalog)) return false;
+      if (selectedQuestionType == 0) return true;
+      final selectedTypeName = questionTypes[selectedQuestionType];
       if (q.typeLabel == selectedTypeName) return true;
       final qType = int.tryParse(q.type ?? '');
-      if (qType != null && qType == questionType) return true;
+      if (qType != null && qType == selectedQuestionType) return true;
       return false;
     }).toList();
     // 3️⃣ 构造两个 id 集合
@@ -344,9 +358,9 @@ class _QuestionGridPageState extends State<QuestionGridPage> {
     // 4️⃣ 取交集
     final Set<String> commonIds = userIds.intersection(questionIds);
     // 5️⃣ 双向同步过滤
-    userQuestions =
-        userQuestions.where((uq) => commonIds.contains(uq.id)).toList();
     questions = questions.where((q) => commonIds.contains(q.id)).toList();
+    final usersById = {for (final uq in userQuestions) uq.id: uq};
+    userQuestions = questions.map((q) => usersById[q.id]!).toList();
 
     return MapEntry(questions, userQuestions);
   }
@@ -354,6 +368,7 @@ class _QuestionGridPageState extends State<QuestionGridPage> {
   /// 获取数据
   Future<void> _loadSettings() async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
     // 获取设置数据并更新状态
     setState(() {
       cutType = (prefs.getInt('cutType') ?? 0).clamp(0, cutTypes.length - 1);
@@ -373,12 +388,13 @@ class _QuestionGridPageState extends State<QuestionGridPage> {
       //    (lastQIndex / 5).floor() * 100.0,
       //  );
       //});
-      List<Question> questions = await allQuestions;
-      List<UserQuestion> userQuestions = await allUserQuestions;
+      await _loadSettings();
       if (!mounted) return;
-      if (questions.isEmpty) return;
-      // lastQIndex 是上次的页码。题库更新后题量可能变化，或该记录可能来自
-      // 其它章节，这里做边界保护，避免 PageController(initialPage: 越界) 崩溃。
+      final filtered = await _filter(allQuestions, allUserQuestions);
+      final questions = filtered.key;
+      final userQuestions = filtered.value;
+      if (!mounted || questions.isEmpty) return;
+      // Existing progress is a page index, not a stable question ID.
       final int targetIndex = lastQIndex.clamp(0, questions.length - 1).toInt();
       final result = await Navigator.push(
         context,
@@ -388,6 +404,11 @@ class _QuestionGridPageState extends State<QuestionGridPage> {
             questions: questions,
             userQuestions: userQuestions,
             questionIndex: targetIndex,
+            defaultShowCutContent: cutType == 1,
+            chapterQuestionFilter: (qs, uqs) => _filter(
+              Future.value(qs), Future.value(uqs),
+              updateChapterNumbers: false,
+            ),
           ),
         ),
       );
@@ -669,6 +690,28 @@ class _QuestionGridPageState extends State<QuestionGridPage> {
     );
   }
 
+  Widget _buildYearFilterSection() {
+    return FutureBuilder<List<Question>>(
+      future: allQuestions,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done || !snapshot.hasData) {
+          return const SizedBox.shrink();
+        }
+        return QuestionYearFilterSection(
+          catalog: QuestionYearCatalog.fromValues(snapshot.data!.map((q) => q.year)),
+          filter: _yearFilter,
+          onChanged: (value) {
+            setState(() {
+              _yearFilter = value;
+              _savedScrollOffset = 0;
+            });
+            if (_scrollController.hasClients) _scrollController.jumpTo(0);
+          },
+        );
+      },
+    );
+  }
+
   /// 本章节统计卡片
   Widget _buildChapterStatsCard() {
     final scheme = Theme.of(context).colorScheme;
@@ -805,6 +848,10 @@ class _QuestionGridPageState extends State<QuestionGridPage> {
                   userQuestions: userQuestions,
                   questionIndex: index,
                   defaultShowCutContent: cutType == 1,
+                  chapterQuestionFilter: (qs, uqs) => _filter(
+                    Future.value(qs), Future.value(uqs),
+                    updateChapterNumbers: false,
+                  ),
                 ),
               ),
             );
@@ -900,8 +947,8 @@ class _QuestionGridPageState extends State<QuestionGridPage> {
             ],
           ),
         ),
-        endDrawer: FractionallySizedBox(
-          widthFactor: 0.72, // 宽度占父容器的72%
+        endDrawer: SizedBox(
+          width: math.min(460.0, MediaQuery.sizeOf(context).width * 0.92),
           child: Drawer(
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.zero, // 设为0，去掉圆角
@@ -998,6 +1045,10 @@ class _QuestionGridPageState extends State<QuestionGridPage> {
                   ),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: _buildYearFilterSection(),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
                     child: _buildFilterSection(
                       '模式',
                       modesList,
@@ -1033,26 +1084,40 @@ class _QuestionGridPageState extends State<QuestionGridPage> {
                               return _buildLoadingIndicator();
                             } else if (snapshot.hasError) {
                               return _buildErrorMessage(snapshot.error);
-                            } else if (!snapshot.hasData || snapshot.data!.key.isEmpty) {
-                              return _buildEmptyMessage('在当前筛选条件下\n本章节中还没有题目哦~');
+                            } else if (!snapshot.hasData) {
+                              return _buildEmptyMessage('暂无题目');
                             } else {
-                              return LayoutBuilder(
-                                builder: (context, constraints) {
-                                  // 每个按钮的固定宽度和高度
-                                  const double btnSize = 52.0;
-                                  final double width = constraints.maxWidth;
-                                  final int count = math.max(1, ((width + 24) / (btnSize + 24)).floor());
-                                  final double crossSpacing = count > 1
-                                      ? math.max(0.0, (width - count * btnSize) / (count - 1))
-                                      : 0.0;
-                                  return _buildQuestionGrid(
-                                    snapshot.data!.key,
-                                    snapshot.data!.value,
-                                    count,
-                                    crossSpacing,
-                                    btnSize,
-                                  );
-                                },
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  Padding(
+                                    padding: const EdgeInsets.only(bottom: 12),
+                                    child: Text('当前筛选：${snapshot.data!.key.length}题'),
+                                  ),
+                                  Expanded(
+                                    child: snapshot.data!.key.isEmpty
+                                        ? _buildEmptyMessage('在当前筛选条件下\n本章节中还没有题目哦~')
+                                        : LayoutBuilder(
+                                            builder: (context, constraints) {
+                                              const double btnSize = 52.0;
+                                              final width = constraints.maxWidth;
+                                              final count = math.max(1,
+                                                  ((width + 24) / (btnSize + 24)).floor());
+                                              final crossSpacing = count > 1
+                                                  ? math.max(0.0,
+                                                      (width - count * btnSize) / (count - 1))
+                                                  : 0.0;
+                                              return _buildQuestionGrid(
+                                                snapshot.data!.key,
+                                                snapshot.data!.value,
+                                                count,
+                                                crossSpacing,
+                                                btnSize,
+                                              );
+                                            },
+                                          ),
+                                  ),
+                                ],
                               );
                             }
                           },

@@ -1,0 +1,40 @@
+name: Windows year-filter custom build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Visual Studio
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Format custom filter sources
+        run: dart format lib/common/question_year_filter.dart lib/widgets/question_year_filter_section.dart test/question_year_filter_test.dart test/question_year_filter_section_test.dart test/question_grid_year_filter_test.dart
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos
+      - name: Test
+        run: flutter test
+      - name: Build Windows release
+        run: flutter build windows --release
+      - name: Package entire runtime directory
+        shell: pwsh
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath yibubang-windows-year-filter.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yibubang-windows-year-filter
+          path: yibubang-windows-year-filter.zip
+          retention-days: 14
