@@ -37,6 +37,12 @@ void main() {
     await records.execute('CREATE TABLE Question (id TEXT PRIMARY KEY, '
         'chapter_id TEXT, chapter_parent_id TEXT, cut_question TEXT, '
         'user_answer TEXT, status INTEGER, collection INTEGER, updated_at INTEGER)');
+    // Match the production activity schema so chapter statistics can load normally.
+    await records.execute('CREATE TABLE Activities ('
+        'id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL, '
+        'timestamp INTEGER NOT NULL, bank_id TEXT, question_id TEXT, '
+        'identity_id TEXT, subject_id TEXT, chapter_id TEXT, is_right TEXT, '
+        'duration INTEGER NOT NULL DEFAULT 0)');
     final years = <String?>['2026', '2022', '2021', null, '2022/2026'];
     for (var i = 0; i < years.length; i++) {
       final id = 'q${i + 1}';
@@ -85,9 +91,25 @@ void main() {
   }
 
   Future<void> choose(WidgetTester tester, String label) async {
-    final target = find.text(label);
-    await tester.ensureVisible(target);
-    await tester.tap(target);
+    final drawer = find.byType(Drawer);
+    final target = find.descendant(of: drawer, matching: find.text(label));
+    final scrollable = find.descendant(
+      of: drawer,
+      matching: find.byType(Scrollable),
+    );
+    // ensureVisible can reveal the enclosing ListView item (the whole year
+    // section) while its last Wrap row is still below the 800x600 viewport.
+    // Scroll the real drawer until the label itself can receive a tap. Handle
+    // both directions because reopening the drawer retains its scroll offset.
+    for (var i = 0; i < 20 && target.hitTestable().evaluate().isEmpty; i++) {
+      final scrollDown = target.evaluate().isEmpty ||
+          tester.getCenter(target).dy > tester.getCenter(scrollable).dy;
+      await tester.drag(scrollable, Offset(0, scrollDown ? -160 : 160));
+      await tester.pumpAndSettle();
+    }
+    expect(target.hitTestable(), findsOneWidget,
+        reason: 'The drawer option "$label" must be tappable before selection');
+    await tester.tap(target.hitTestable());
     await tester.pumpAndSettle();
   }
 
